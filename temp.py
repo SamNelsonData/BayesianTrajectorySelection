@@ -24,16 +24,17 @@ import time
 seed(42)
 
 temp = SciWrld(
-    size=(15,15),
-    starting_seeds=4,
-    rocks = 30
+    size=(12,12),
+    starting_seeds=8,
+    rocks = 25
     )
 
-steps = 100
+steps = 10
+temp.step(40)
 for step in range(steps):
     sys.stdout.write(str(temp))
     sys.stdout.flush()
-    sys.stdout.write("\033[15A")
+    sys.stdout.write("\033[12A")
     temp.step()
-    time.sleep(.2)
+    time.sleep(.5)
 sys.stdout.write("Done")
