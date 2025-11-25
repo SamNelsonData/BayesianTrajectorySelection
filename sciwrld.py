@@ -140,7 +140,7 @@ class SciWrld:
                 ), cloud_direction)]
             
             # -- Move the clouds
-            for cloud, direction in self.clouds:
+            for cloud, direction in self.clouds[:]:
                 cloud.move(direction)
 
                 # -- Track Offscreen Clouds
