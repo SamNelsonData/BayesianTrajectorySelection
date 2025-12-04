@@ -152,25 +152,9 @@ class SciWrld:
                     self.clouds.remove((cloud, direction))
             
             # --- Agent Update ---
+
+
             arow, acol = tuple(self.agent.position)
-
-            # -- Get Available Actions
-            actions = []
-            rock_val = self.item_to_value['Rock']
-            # - Test Up
-            if arow > 0 and self.world[arow - 1, acol] != rock_val:
-                actions += ['Up']
-            # - Test Left
-            if acol > 0 and self.world[arow, acol - 1] != rock_val:
-                actions += ['Left']
-            # - Test Down
-            if arow < self.size[0] - 1 and self.world[arow + 1, acol] != rock_val:
-                actions += ['Down']
-            # - Test Right
-            if acol < self.size[1] - 1 and self.world[arow, acol + 1] != rock_val:
-                actions += ['Right']
-
-            self.agent.action(choice(actions, 1)[0])
 
             # --- Update Map ---
             self.world[arow, acol] = 0
@@ -284,6 +268,24 @@ class Cloud:
             answer += '\n'
         return answer
 
+# Actor Agent, recieves a reward (critique) from a Critic reward function
+class AgentA2C:
+    
+    def __init__(
+            self,
+            position,
+            states
+    ):
+        self.position = position
+        self.states = states
+        self.battery = 2
+        self.transition_prob = zeros(tuple(array(states.shape)**2))
+
+    def __calc_possible_actions(self):
+        actions = [0, 1, 2, 3]
+        
+
+    
 
 class Agent:
     '''
@@ -325,19 +327,15 @@ class Agent:
     def increase_battery(self, increase = 1):
         self.battery += increase
 
+    def set_reward(self, reward_func):
+        self.reward = reward_func
+        
     def __call__(self, action):
         self.action(action)
 
     def __bool__(self):
         return self.battery > 0
     
-    '''
-    This method isn't really implemented. Important features 
-    (other than the world tiles) include the agent's position 
-    and other things.
-    '''
-    def get_features(self, world: SciWrld):
-        return world.world
 
 class RewardNet(nn.Module):
         
