@@ -13,11 +13,6 @@ class SciWrld:
         around the map. The agent should generally avoid 
         clouds as the agent is solar-powered and will lose 
         battery.
-
-    TODO
-    - I don't think it should handle available actions to the 
-        agent. That functionality should probably be moved to 
-        the Agent class
     '''
     
     # --- Graphical Representation ---
@@ -47,15 +42,9 @@ class SciWrld:
         self.__refresh_empty()
         self.world_time = 0
 
-        # --- Build Map ---
+        self.agent = None
 
-        # -- Agent Spawn
-        val = self.item_to_value['Agent']
-        self.random_quota(1, val)
-        self.agent = Agent(
-            array(where(self.world == val)).reshape(-1),
-            self.size
-        )
+        # --- Build Map ---
 
         # -- Rocks
         self.random_quota(rocks, self.item_to_value['Rock'])
@@ -151,15 +140,30 @@ class SciWrld:
                 if not onscreen:
                     self.clouds.remove((cloud, direction))
             
-            # --- Agent Update ---
+            # --- Update Agent ---
+            self.world[self.agent.position] = self.item_to_value['Sand']
+            new_pos = self.agent.act()
+            self.world[new_pos] = self.item_to_value['Agent']
 
 
-            arow, acol = tuple(self.agent.position)
-
-            # --- Update Map ---
-            self.world[arow, acol] = 0
-            self.world[tuple(self.agent.position)] = self.item_to_value['Agent']
-
+    def add_agent(self, Agent, position=None):
+        if position is None:
+            pos_index = choice(len(self.empty[0]))
+            position = [self.empty[0][pos_index], self.empty[1][pos_index]]
+            self.agent = Agent(
+                position= position,
+                states= self.world
+            )
+            self[position] = self.item_to_value['Agent']
+            self.__refresh_empty()
+        else:
+            self.agent = Agent(
+                position= position,
+                states= self.world
+            )
+            self[position] = self.item_to_value['Agent']
+            self.__refresh_empty()
+    
     # --- Overloaded Operators ---
     def __str__(self):
         answer = ""
@@ -184,7 +188,7 @@ class SciWrld:
         return self.world[i]
     
     def __setitem__(self, i, v):
-        self.world[i] = v
+        self.world[i[0], i[1]] = v
     
     def __contains__(self, v):
         row = v[0]
@@ -268,8 +272,12 @@ class Cloud:
             answer += '\n'
         return answer
 
-# Actor Agent, recieves a reward (critique) from a Critic reward function
-class AgentA2C:
+'''
+General Agent class. Provides functionality for:
+  - Determining possible actions via class field transition_prob, a matrix of possible actions transition probabilities (boolean in this case)
+  - Making Random Actions
+'''
+class Agent:
     
     def __init__(
             self,
@@ -279,15 +287,49 @@ class AgentA2C:
         self.position = position
         self.states = states
         self.battery = 2
-        self.transition_prob = zeros(tuple(array(states.shape)**2))
+        self.transition_prob = zeros(tuple(array(states.shape)**2)).astype(bool) # make matrix with (n*n)x(n*n) dim for nxn world
 
-    def __calc_possible_actions(self):
-        actions = [0, 1, 2, 3]
-        
+        for position in range(states.shape[0] * states.shape[1]):
+            available_spaces = self.__adjacent_spaces(self.__index_swap(position))
 
+            for available_space in available_spaces:
+                if self.states[available_space[0], available_space[1]] != 2: # check there isn't a rock there
+                    self.transition_prob[position, self.__index_swap(available_space)] = True
     
+    def random_action(self):
+        available_actions = where(self.transition_prob[self.__index_swap(self.position)])[0]
 
-class Agent:
+        action = self.__index_swap(choice(available_actions))
+
+        self.position = action
+
+    def __index_swap(self, index):
+        dim = len(self.states)
+        if hasattr(index, '__iter__'):
+            return dim*index[0] + index[1]
+        return (int(index / dim), index % dim)
+    
+    def __adjacent_spaces(self, position):
+        spaces = []
+        dim = len(self.states)
+
+        # above
+        if position[0] > 0:
+            spaces += [[position[0] - 1, position[1]]]
+        # left
+        if position[1] > 0:
+            spaces += [[position[0], position[1] - 1]]
+        # down
+        if position[0] < dim - 1:
+            spaces += [[position[0] + 1, position[1]]]
+        # right
+        if position[1] < dim - 1:
+            spaces += [[position[0], position[1] + 1]]
+        
+        return spaces
+
+# Incomplete Actor-Critic Agent, inherits Agent class
+class AgentA2C(Agent):
     '''
     The Agent class currently exists as a place holder. Eventually 
     it will include functionality like determining possible 
@@ -297,45 +339,13 @@ class Agent:
     def __init__(
             self,
             position,
-            limits,
-            battery=2
+            states
     ):
-        self.position = position
-        self.limits = limits
-        self.battery = battery
-
-    def action(self, action, speed=1):
-        match action:
-            case 'Up':
-                if self.position[0] > 0:
-                    self.position[0] -= speed
-            case 'Left':
-                if self.position[1] > 0:
-                    self.position[1] -= speed
-            case 'Down':
-                if self.position[0] < self.limits[0] - 1:
-                    self.position[0] += speed
-            case 'Right':
-                if self.position[1] < self.limits[1] - 1:
-                    self.position[1] += speed
-            case 'Sample':
-                raise Exception('Sample is not yet implemented')
-
-    def reduce_battery(self, reduction = 1):
-        self.battery -= reduction
+        super().__init__(position, states)
     
-    def increase_battery(self, increase = 1):
-        self.battery += increase
-
-    def set_reward(self, reward_func):
-        self.reward = reward_func
-        
-    def __call__(self, action):
-        self.action(action)
-
-    def __bool__(self):
-        return self.battery > 0
-    
+    def act(self):
+        self.random_action()
+        return self.position
 
 class RewardNet(nn.Module):
         
