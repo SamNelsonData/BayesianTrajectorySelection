@@ -1,3 +1,8 @@
+from numpy import zeros, array, where
+from numpy.random import choice, uniform, seed
+
+from copy import deepcopy
+
 '''
 General Agent class. Provides functionality for:
   - Determining possible actions via class field transition_prob, a matrix of possible actions transition probabilities (boolean in this case)

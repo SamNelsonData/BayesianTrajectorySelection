@@ -31,7 +31,8 @@ temp = SciWrld(
     )
 
 temp.add_agent(AgentA2C)
-temp.sample_trajectories(seeded=25, steps=10)
+
+print(temp.sample_trajectories(seeded=25, steps=10))
 
 exit(0)
 steps = 40

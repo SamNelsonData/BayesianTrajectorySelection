@@ -197,7 +197,11 @@ class SciWrld:
             print(answer[:-1])
             print("——————————————————————————————")
         
-        preferred_trajectory = input("Which trajectory looks best?")
+        preferred_trajectory = int(input("Which trajectory looks best? (1 or 2)\n"))
+
+        trajectory = self.agent.gen_trajectory(seeded=seeds[preferred_trajectory - 1], steps=steps, policy=policy)
+
+        return trajectory
 
 
 
