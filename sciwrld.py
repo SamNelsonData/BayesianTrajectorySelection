@@ -1,9 +1,8 @@
 
-from numpy.random import uniform, choice, binomial
+from numpy.random import uniform, choice, binomial, seed
 from numpy import where, zeros, array
 
-import torch
-import torch.nn as nn
+from Agents import Agent, AgentA2C
 
 class SciWrld:
     '''
@@ -13,11 +12,6 @@ class SciWrld:
         around the map. The agent should generally avoid 
         clouds as the agent is solar-powered and will lose 
         battery.
-
-    TODO
-    - I don't think it should handle available actions to the 
-        agent. That functionality should probably be moved to 
-        the Agent class
     '''
     
     # --- Graphical Representation ---
@@ -30,7 +24,7 @@ class SciWrld:
         'Cloud': 6
     }
     
-    symbols = ['.', '\u25b2', '6', 'X', '*', 'm']
+    symbols = [' ', '⛰', '6', 'X', '*', 'm']
     value_to_item = {value: key for key, value in item_to_value.items()}
     value_to_symbol = dict(zip(item_to_value.values(), symbols))
     
@@ -46,16 +40,7 @@ class SciWrld:
         self.world = zeros(size).astype(int)
         self.__refresh_empty()
         self.world_time = 0
-
-        # --- Build Map ---
-
-        # -- Agent Spawn
-        val = self.item_to_value['Agent']
-        self.random_quota(1, val)
-        self.agent = Agent(
-            array(where(self.world == val)).reshape(-1),
-            self.size
-        )
+        self.agent = None
 
         # -- Rocks
         self.random_quota(rocks, self.item_to_value['Rock'])
@@ -151,14 +136,73 @@ class SciWrld:
                 if not onscreen:
                     self.clouds.remove((cloud, direction))
             
-            # --- Agent Update ---
+            # --- Update Agent ---
+            self.world[self.agent.position] = self.item_to_value['Sand']
+            new_pos = self.agent.act()
+            self.world[new_pos] = self.item_to_value['Agent']
+
+    def add_agent(self, Agent, position=None):
+        if position is None:
+            pos_index = choice(len(self.empty[0]))
+            position = [self.empty[0][pos_index], self.empty[1][pos_index]]
+            self.agent = Agent(
+                position= position,
+                states= self.world
+            )
+            self[position] = self.item_to_value['Agent']
+            self.__refresh_empty()
+        else:
+            self.agent = Agent(
+                position= position,
+                states= self.world
+            )
+            self[position] = self.item_to_value['Agent']
+            self.__refresh_empty()
+    
+    def sample_trajectories(self, k = 2, steps = 5, seeded=None, policy=None):
+        if seeded is None:
+            seeds = uniform(0, 1000, size=k).astype(int)
+        else:
+            seed(seeded)
+            seeds = uniform(0, 1000, size=k).astype(int)
+
+        trajectories = []
+
+        trajectory_index = 0
+        for s in seeds:
+            print(f'Trajectory segment {trajectory_index + 1}')
+            trajectory = self.agent.gen_trajectory(seeded = s, steps = steps, policy=policy)
+            trajectories += [trajectory]
+            trajectory = trajectory[:-1]
+            chars = str(self.agent)[1:]
+
+            trajectory_dict = dict(zip(trajectory, chars))
+
+            answer = ""
+            row_ind = 0
+            for row in self.world:
+                col_ind = 0
+                for col in row:
+                    item = self.value_to_symbol[col]
+                    for cloud, _ in self.clouds:
+                        if (row_ind, col_ind) in cloud:
+                            item = "⛆" # TODO cloud symbol currently hardcoded
+                    if (row_ind, col_ind) in trajectory and item != self.symbols[3]:
+                        item = trajectory_dict[(row_ind, col_ind)]
+                    answer += f'{item:<2}'
+                    col_ind += 1
+                answer += '\n'
+                row_ind += 1
+            trajectory_index += 1
+            print(answer[:-1])
+            print("——————————————————————————————")
+        
+        preferred_trajectory = input("Which trajectory looks best?")
 
 
-            arow, acol = tuple(self.agent.position)
 
-            # --- Update Map ---
-            self.world[arow, acol] = 0
-            self.world[tuple(self.agent.position)] = self.item_to_value['Agent']
+            
+        
 
     # --- Overloaded Operators ---
     def __str__(self):
@@ -170,7 +214,7 @@ class SciWrld:
                 item = self.value_to_symbol[col]
                 for cloud, _ in self.clouds:
                     if (row_ind, col_ind) in cloud:
-                        item = "m" # TODO cloud symbol currently hardcoded
+                        item = "⛆" # TODO cloud symbol currently hardcoded
                 answer += f'{item:<2}'
                 col_ind += 1
             answer += '\n'
@@ -184,7 +228,7 @@ class SciWrld:
         return self.world[i]
     
     def __setitem__(self, i, v):
-        self.world[i] = v
+        self.world[i[0], i[1]] = v
     
     def __contains__(self, v):
         row = v[0]
@@ -267,118 +311,4 @@ class Cloud:
                 answer += f'{col:<2}'
             answer += '\n'
         return answer
-
-# Actor Agent, recieves a reward (critique) from a Critic reward function
-class AgentA2C:
-    
-    def __init__(
-            self,
-            position,
-            states
-    ):
-        self.position = position
-        self.states = states
-        self.battery = 2
-        self.transition_prob = zeros(tuple(array(states.shape)**2))
-
-    def __calc_possible_actions(self):
-        actions = [0, 1, 2, 3]
-        
-
-    
-
-class Agent:
-    '''
-    The Agent class currently exists as a place holder. Eventually 
-    it will include functionality like determining possible 
-    actions and which actions may be optimal.
-    '''
-    
-    def __init__(
-            self,
-            position,
-            limits,
-            battery=2
-    ):
-        self.position = position
-        self.limits = limits
-        self.battery = battery
-
-    def action(self, action, speed=1):
-        match action:
-            case 'Up':
-                if self.position[0] > 0:
-                    self.position[0] -= speed
-            case 'Left':
-                if self.position[1] > 0:
-                    self.position[1] -= speed
-            case 'Down':
-                if self.position[0] < self.limits[0] - 1:
-                    self.position[0] += speed
-            case 'Right':
-                if self.position[1] < self.limits[1] - 1:
-                    self.position[1] += speed
-            case 'Sample':
-                raise Exception('Sample is not yet implemented')
-
-    def reduce_battery(self, reduction = 1):
-        self.battery -= reduction
-    
-    def increase_battery(self, increase = 1):
-        self.battery += increase
-
-    def set_reward(self, reward_func):
-        self.reward = reward_func
-        
-    def __call__(self, action):
-        self.action(action)
-
-    def __bool__(self):
-        return self.battery > 0
-    
-
-class RewardNet(nn.Module):
-        
-        '''
-        This method is currently unimplemented as a reward function
-        '''
-
-        def __init__(self, model: nn.Sequential, device='mps'):
-            super().__init__()
-
-            self.net = model
-            self.device = device
-
-            self.to(self.device)
-    
-        def set_action_index(self, index):
-            self.action_index = index
-
-        def action_max(self, X, lr=5e-2, epochs=80):
-            if not torch.is_tensor(X):
-                X = torch.tensor(X, dtype=torch.float32, requires_grad=True).to(self.device)
-            else:
-                X = X.clone().detach()
-                X.requires_grad_(True)
-                X.to(self.device)
-
-            for i in range(epochs):
-                y = self(X)
-                y.backward()
-                gradient = X.grad[self.action_index]
-                with torch.no_grad():
-                    addition = torch.zeros(X.size()).requires_grad(False)
-                    addition[self.action_index] = gradient
-                    X += lr * addition
-                self.net.zero_grad()
-            return X[self.action_index]
-                
-        def __call__(self, X):
-            if not torch.is_tensor(X):
-                X = torch.tensor(X).to(self.device)
-            return self.net(X).flatten()
-
-
-
-
 
