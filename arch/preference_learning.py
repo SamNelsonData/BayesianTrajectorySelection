@@ -41,10 +41,7 @@ class PreferenceLearner:
     """
     
     def __init__(self, reward_model, learning_rate=1e-3):
-        """
-        @param reward_model: RewardModel instance to train
-        @param learning_rate: learning rate for optimizer
-        """
+
         self.reward_model = reward_model
         self.optimizer = optim.Adam(reward_model.parameters(), lr=learning_rate)
         self.loss_history = []
