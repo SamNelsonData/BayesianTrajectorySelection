@@ -3,7 +3,6 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
-from typing import List, Tuple
 
 class PreferenceDataset(Dataset):
     """
@@ -17,13 +16,7 @@ class PreferenceDataset(Dataset):
         self.preferences = []  # list of preferred indices (0 or 1)
     
     def add_preference(self, traj1_states, traj2_states, preferred_idx):
-        """
-        Add a preference comparison.
-        
-        @param traj1_states: encoded states for trajectory 1 [T, state_dim]
-        @param traj2_states: encoded states for trajectory 2 [T, state_dim]
-        @param preferred_idx: 0 if traj1 preferred, 1 if traj2 preferred
-        """
+
         self.traj_pairs.append((traj1_states, traj2_states))
         self.preferences.append(preferred_idx)
     
@@ -92,11 +85,7 @@ class PreferenceLearner:
         return loss
     
     def train_step(self, traj1_states, traj2_states, preferred_idx):
-        """
-        Single training step.
-        
-        @return: loss value
-        """
+
         self.optimizer.zero_grad()
         loss = self.compute_preference_loss(traj1_states, traj2_states, preferred_idx)
         loss.backward()
@@ -105,13 +94,7 @@ class PreferenceLearner:
         return loss.item()
     
     def train_epoch(self, dataloader, verbose=True):
-        """
-        Train for one epoch over the dataset.
-        
-        @param dataloader: DataLoader with PreferenceDataset
-        @param verbose: whether to print progress
-        @return: average loss
-        """
+
         total_loss = 0.0
         num_batches = 0
         
@@ -131,14 +114,7 @@ class PreferenceLearner:
         return avg_loss
     
     def train(self, dataset, epochs=50, batch_size=32, verbose=True):
-        """
-        Train the reward model on a preference dataset.
-        
-        @param dataset: PreferenceDataset instance
-        @param epochs: number of training epochs
-        @param batch_size: batch size
-        @param verbose: whether to print progress
-        """
+
         if len(dataset) == 0:
             print("Warning: Empty dataset, skipping training")
             return
@@ -157,15 +133,7 @@ class PreferenceLearner:
 
 
 def collect_human_preference(world, traj1, traj2, display=True):
-    """
-    Collect a human preference between two trajectories.
-    
-    @param world: SciWrld instance
-    @param traj1: first trajectory (list of positions)
-    @param traj2: second trajectory (list of positions)
-    @param display: whether to display trajectories visually
-    @return: preferred trajectory index (0 or 1)
-    """
+
     if display:
         print("\n" + "="*50)
         print("TRAJECTORY COMPARISON")
