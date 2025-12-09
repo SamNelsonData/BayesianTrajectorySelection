@@ -618,11 +618,11 @@ def main():
         print("  2. Iterate: collect more preferences with improved policy")
         print("  3. Compare sample efficiency across methods")
         
-        from test import RewardModelTester
+        # from test import RewardModelTester
 
-        # Assuming you have a trained trainer
-        tester = RewardModelTester(trainer)
-        tester.run_all_tests(num_test=50)
+        # # Assuming you have a trained trainer
+        # tester = RewardModelTester(trainer)
+        # tester.run_all_tests(num_test=50)
 
 
 if __name__ == "__main__":
