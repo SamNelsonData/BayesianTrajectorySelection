@@ -1,2 +1,5 @@
-temp.py
-TPR.py
+__pycache__/
+*.pyc
+.env/
+hai/
+*.png

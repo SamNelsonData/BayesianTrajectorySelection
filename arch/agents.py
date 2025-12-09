@@ -129,21 +129,77 @@ class Agent:
             old_pos = pos
         return "".join(traj)
             
-# Incomplete Actor-Critic Agent, inherits Agent class
 class AgentA2C(Agent):
-    '''
-    The Agent class currently exists as a place holder. Eventually 
-    it will include functionality like determining possible 
-    actions and which actions may be optimal.
-    '''
-    
-    def __init__(
-            self,
-            position,
-            states
-    ):
+
+    def __init__(self, position, states, policy_network):
         super().__init__(position, states)
-    
-    def act(self):
-        self.random_action()
+        self.policy = policy_network   
+        
+    def _get_state_features(self):
+        """
+        Converts agent & environment into NN input features.
+        For now: simple minimal features.
+        You can expand later.
+        """
+        r, c = self.position
+        dim = self.states.shape[0]
+
+        # normalize row/col
+        return array([
+            r / dim,
+            c / dim,
+        ], dtype=float)  # → shape (2,)
+
+    def act(self, deterministic=False):
+        """
+        RL-based action. 
+        4 discrete actions: 0=Up, 1=Left, 2=Down, 3=Right
+        """
+        state = self._get_state_features()
+
+        action_tensor, _ = self.policy.get_action(
+            state.reshape(1, -1), deterministic=deterministic
+        )
+        action = int(action_tensor.item())
+
+        # translate action → new position
+        r, c = self.position
+        candidate = {
+            0: (r - 1, c),
+            1: (r, c - 1),
+            2: (r + 1, c),
+            3: (r, c + 1)
+        }[action]
+
+        # check bounds + rocks
+        rr, cc = candidate
+        if (0 <= rr < self.states.shape[0] and
+            0 <= cc < self.states.shape[1] and
+            self.states[rr, cc] != 2):
+
+            self.position = candidate
+
         return self.position
+
+    def gen_trajectory(self, seeded=None, policy=None, steps=5):
+        """
+        Override to support neural network policy.
+        """
+        original_pos = deepcopy(self.position)
+
+        if policy is None:
+            policy = lambda agent: agent.act()
+
+        if seeded is not None:
+            seed(seeded)
+            seeds = uniform(0, 100000, steps).astype(int)
+
+        trajectory = []
+        for step in range(steps):
+            if seeded is not None:
+                seed(seeds[step])
+            trajectory.append(policy(self))
+
+        self.position = original_pos
+        self.trajectory = trajectory
+        return trajectory

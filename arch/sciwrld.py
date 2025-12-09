@@ -1,8 +1,10 @@
 
 from numpy.random import uniform, choice, binomial, seed
 from numpy import where, zeros, array
+import numpy as np
+from copy import deepcopy
 
-from Agents import Agent, AgentA2C
+from arch.agents import Agent, AgentA2C
 
 class SciWrld:
     '''
@@ -105,6 +107,7 @@ class SciWrld:
                 row = binomial(self.size[0] - cloud_bounds[0], 0.5)
                 col = binomial(self.size[1] - cloud_bounds[1], 0.5)
                 edge = int(uniform(0, 4))
+
                 match edge:
                     case 0:
                         location = (0 - cloud_bounds[0], col)
@@ -118,6 +121,7 @@ class SciWrld:
                     case 3:
                         location = (row, self.size[1] - 1 + cloud_bounds[1])
                         cloud_direction = 1
+                        
                 self.clouds += [(Cloud(
                     size=cloud_size,
                     bounds=cloud_bounds,
@@ -242,6 +246,32 @@ class SciWrld:
         if (row >= self.size[0]) or (col >= self.size[1]):
             return False
         return True
+
+def encode_state(world: SciWrld):
+    ar, ac = world.agent.position
+    battery = world.agent.battery
+    t = world.world_time
+
+    # find seeds
+    seed_positions = np.argwhere(world.world == world.item_to_value['Seed'])
+    if len(seed_positions) > 0:
+        dists = np.sum(np.abs(seed_positions - np.array([ar, ac])), axis=1)
+        nearest_idx = np.argmin(dists)
+        sr, sc = seed_positions[nearest_idx]
+    else:
+        sr, sc = -1, -1  # no seeds left
+
+    # is the agent under a cloud?
+    in_cloud = 0
+    for cloud, _ in world.clouds:
+        if (ar, ac) in cloud:
+            in_cloud = 1
+            break
+
+    return np.array([
+        ar, ac, sr, sc, in_cloud, battery, t
+    ], dtype=np.float32)
+
 
 class Cloud:
     '''
