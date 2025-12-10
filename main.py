@@ -100,8 +100,10 @@ class IRDRLHFTrainer:
         print(f"Uncertainty method: {uncertainty_method}")
         print(f"World size: {world_size}")
     
-    def reset_world(self):
+    def reset_world(self, rng_seed=None):
         """Create fresh world instance with clouds and seeds."""
+        if rng_seed is not None:
+            np.random.seed(rng_seed)
         self.world = SciWrld(
             size=self.world_size,
             starting_seeds=5,
@@ -586,6 +588,7 @@ def main():
     
     args = parser.parse_args()
     
+    # TODO comment bottom two lines
     if args.compare:
         compare_methods(num_preferences_per_method=args.num_preferences)
     else:

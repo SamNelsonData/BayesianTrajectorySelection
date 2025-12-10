@@ -75,6 +75,12 @@ class Agent:
         self.position = action
         return action
 
+    def inc_battery(self, inc=1):
+        self.battery += inc
+    
+    def dec_battery(self, dec=1):
+        self.battery -= dec
+
     '''
     Switches from (row,column) indexing to single value indexing
     '''

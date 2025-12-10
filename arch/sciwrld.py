@@ -141,9 +141,22 @@ class SciWrld:
                     self.clouds.remove((cloud, direction))
             
             # --- Update Agent ---
-            self.world[self.agent.position] = self.item_to_value['Sand']
-            new_pos = self.agent.act()
-            self.world[new_pos] = self.item_to_value['Agent']
+            if self.agent.battery > 0:
+                self.world[self.agent.position] = self.item_to_value['Sand']
+                new_pos = self.agent.act()
+                self.world[new_pos] = self.item_to_value['Agent']
+
+            # -- Adjust battery
+            in_cloud = False
+            for cloud, _ in self.clouds:
+                if self.agent.position in cloud:
+                    in_cloud = True
+                    break
+            
+            if in_cloud:
+                self.agent.dec_battery()
+            elif self.agent.battery < 2:
+                self.agent.inc_battery()
 
     def add_agent(self, Agent, position=None):
         if position is None:

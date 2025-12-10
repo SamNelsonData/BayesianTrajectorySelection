@@ -69,15 +69,12 @@ class PolicyNetwork(nn.Module):
         
         return log_prob, entropy
     
-    def train(self, state_feature_list, reward_func, lr=0.1, beta = 1.0, deterministic=True):
-        assert False # Figure out how to handle different feature info for policy and reward
-
+    def train(self, states: list, rewards: list, lr=0.1, beta = 1.0, deterministic=True):
+        
         self.train()
         opt = torch.optim.Adam(self.parameters, lr=lr)
 
-        logits = self.forward(state_feature_list, logits=True)
-
-        rewards = torch.tensor([reward_func(x) for x in state_feature_list])
+        logits = self.forward(states, logits=True)
 
         with torch.no_grad():
             reward_dist = F.softmax(beta * rewards, dim=-1)

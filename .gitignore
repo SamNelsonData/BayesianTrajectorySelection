@@ -4,3 +4,6 @@
 hai/
 *.png
 trash.py
+*.txt
+/pyrlenv/
+.gitignore
