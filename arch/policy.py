@@ -30,7 +30,7 @@ class PolicyNetwork(nn.Module):
             nn.Linear(hidden_dim, num_actions)
         )
     
-    def forward(self, x):
+    def forward(self, x, logits=False):
         # forward pass to get action probabilities
         if not torch.is_tensor(x):
             x = torch.tensor(x, dtype = torch.float32)
@@ -38,7 +38,7 @@ class PolicyNetwork(nn.Module):
         logits = self.net(x)
         probs = F.softmax(logits, dim=-1)
         
-        return probs
+        return logits if logits else probs
     
     def get_action(self, state, deterministic=False):
         """
@@ -68,6 +68,29 @@ class PolicyNetwork(nn.Module):
         entropy = dist.entropy()
         
         return log_prob, entropy
+    
+    def train(self, state_feature_list, reward_func, lr=0.1, beta = 1.0, deterministic=True):
+        assert False # Figure out how to handle different feature info for policy and reward
+
+        self.train()
+        opt = torch.optim.Adam(self.parameters, lr=lr)
+
+        logits = self.forward(state_feature_list, logits=True)
+
+        rewards = torch.tensor([reward_func(x) for x in state_feature_list])
+
+        with torch.no_grad():
+            reward_dist = F.softmax(beta * rewards, dim=-1)
+        
+        policy_dist = F.log_softmax(logits, dim=-1)
+
+        loss = -(reward_dist * policy_dist).sum(dim=-1).mean()
+
+        loss.backwards()
+
+        opt.step()
+
+
 
 
 # ez test
