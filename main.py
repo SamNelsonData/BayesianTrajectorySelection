@@ -502,7 +502,7 @@ def main():
         trainer.evaluate_sample_efficiency(num_test=30)
         
         # Plot
-        trainer.plot_results(save_path=f'results_{args.method}.png')
+        trainer.plot_results(save_path=f'outputs/results_{args.method}.png')
         
         # Optionally train policy
         if args.train_policy:

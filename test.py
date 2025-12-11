@@ -318,7 +318,7 @@ class RewardModelTester:
         
         if plot:
             self.plot_results(
-                save_path=f'test_results_{self.trainer.uncertainty_method}.png'
+                save_path=f'outputs/test_results_{self.trainer.uncertainty_method}.png'
             )
         
         # Summary
