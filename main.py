@@ -3,7 +3,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 from copy import deepcopy
 
-from arch.sciwrld import SciWrld, encode_state
+import torch
+
+from arch.sciwrld import SciWrld
 from arch.agents import Agent, PolicyAgent, trajectory_similarity
 from arch.reward_function import (
     BayesianRewardModel,
@@ -41,13 +43,6 @@ class IRDRLHFTrainer:
         uncertainty_method='ird',  # 'ird', 'ensemble', or 'random'
         num_posterior_samples=100
     ):
-        """
-        @param world_size: (rows, cols) for environment
-        @param state_dim: encoded state dimension
-        @param feature_dim: number of trajectory features (for IRD)
-        @param hidden_dim: hidden layer size for neural models
-        @param uncertainty_method: how to select trajectories
-        """
         self.world_size = world_size
         self.state_dim = state_dim
         self.uncertainty_method = uncertainty_method
@@ -243,19 +238,12 @@ class IRDRLHFTrainer:
     
     def collect_preferences(
         self,
-        num_preferences=50,
-        candidates_per_pair=20,
-        steps=8,
-        simulated=False
+        num_preferences=50, # number of preferences to collect
+        candidates_per_pair=20, # candidates per selection
+        steps=8, # trajectory length
+        simulated=False # if True, use true reward instead of human input
     ):
-        """
-        Collect human preferences on high-uncertainty trajectory pairs.
-        
-        @param num_preferences: number of preferences to collect
-        @param candidates_per_pair: candidates per selection
-        @param steps: trajectory length
-        @param simulated: if True, use true reward instead of human input
-        """
+
         print(f"\n{'='*60}")
         print("COLLECTING PREFERENCES")
         print(f"Method: {self.uncertainty_method}")
@@ -300,7 +288,7 @@ class IRDRLHFTrainer:
                     traj1, world1, traj2, world2, preferred_idx
                 )        
                 
-        print(f"\n✓ Collected {num_preferences} preferences!")
+        print(f"\nCollected {num_preferences} preferences!")
         
         # Train neural reward model if using ensemble or random
         if self.preference_learner is not None and len(self.preference_dataset) > 0:
@@ -312,9 +300,7 @@ class IRDRLHFTrainer:
             )
     
     def _show_and_get_preference(self, traj1, world1, traj2, world2):
-        """
-        Display trajectories and get human preference.
-        """
+
         print("\n--- TRAJECTORY 1 ---")
         print(world1.render(trajectory=traj1))
         true_rew1 = compute_true_reward(world1, traj1)
@@ -335,9 +321,7 @@ class IRDRLHFTrainer:
                 print("Please enter 1 or 2")
     
     def evaluate_sample_efficiency(self, num_test=20):
-        """
-        Evaluate how well learned reward correlates with true reward.
-        """
+
         print(f"\n{'='*60}")
         print("EVALUATING SAMPLE EFFICIENCY")
         print(f"{'='*60}\n")
@@ -364,7 +348,6 @@ class IRDRLHFTrainer:
                 mean_rew, _ = self.reward_model.predict_trajectory_reward(states)
             else:
                 states = encode_trajectory_states(world, traj)
-                import torch
                 self.reward_model.eval()
                 with torch.no_grad():
                     mean_rew = self.reward_model.predict_trajectory_reward(
@@ -409,7 +392,6 @@ class IRDRLHFTrainer:
         return trainer
     
     def plot_results(self, save_path=None):
-        """Plot training progress."""
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
         
         # Uncertainty over time
@@ -432,15 +414,13 @@ class IRDRLHFTrainer:
         
         if save_path:
             plt.savefig(save_path, dpi=150)
-            print(f"✓ Plot saved to {save_path}")
+            print(f"Plot saved to {save_path}")
         else:
             plt.show()
 
 
 def compare_methods(num_preferences=30, simulated=True):
-    """
-    Compare IRD vs Ensemble vs Random trajectory selection.
-    """
+
     methods = ['ird', 'ensemble', 'random']
     results = {}
     
