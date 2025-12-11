@@ -2,7 +2,6 @@ from arch.sciwrld import SciWrld, Cloud, encode_state
 from arch.agents import Agent, PolicyAgent, trajectory_similarity
 from arch.reward_function import (
     BayesianRewardModel,
-    NeuralRewardModel,
     NeuralRewardEnsemble,
     compute_true_reward,
     compute_proxy_reward,
@@ -21,7 +20,7 @@ __all__ = [
     # Agents
     'Agent', 'PolicyAgent', 'trajectory_similarity',
     # Reward Models
-    'BayesianRewardModel', 'NeuralRewardModel', 'NeuralRewardEnsemble',
+    'BayesianRewardModel', 'NeuralRewardEnsemble',
     'compute_true_reward', 'compute_proxy_reward', 'encode_trajectory_states',
     # Preference Learning
     'PreferenceDataset', 'PreferenceLearner', 'EnsemblePreferenceLearner',

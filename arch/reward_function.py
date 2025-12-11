@@ -14,15 +14,15 @@ import torch.nn as nn
 from copy import deepcopy
 
 
+
 class BayesianRewardModel:
     """
     Bayesian reward model for Inverse Reward Design.
     
     Maintains a posterior distribution over reward function weights:
-    P(w_true | w_proxy, M) ∝ P(w_proxy | w_true, M) × P(w_true)
+    P(w_true | preferences) ∝ P(preferences | w_true) × P(w_true)
     
     Uses linear reward: r(trajectory) = w^T φ(trajectory)
-    where φ extracts trajectory features.
     """
     
     FEATURE_NAMES = [
@@ -33,7 +33,7 @@ class BayesianRewardModel:
         "final_battery"
     ]
     
-    def __init__(self, feature_dim=5, num_samples=100, prior_std=1.0):
+    def __init__(self, feature_dim=5, num_samples=100, prior_std=2.0):
         """
         @param feature_dim: dimension of feature vector
         @param num_samples: number of posterior samples to maintain
@@ -43,28 +43,37 @@ class BayesianRewardModel:
         self.num_samples = num_samples
         self.prior_std = prior_std
         
-        # Prior: N(0, prior_std^2 * I)
-        self.prior_mean = np.zeros(feature_dim)
+        # Prior will be set when proxy_weights are provided
+        self.prior_mean = None
         self.prior_cov = np.eye(feature_dim) * (prior_std ** 2)
         
-        # Initialize posterior samples from prior
-        self.posterior_samples = np.random.multivariate_normal(
-            self.prior_mean,
-            self.prior_cov,
-            size=num_samples
-        )
+        # Posterior samples (initialized after proxy weights are set)
+        self.posterior_samples = None
         
         # Proxy reward weights (set by user)
         self.proxy_weights = None
     
     def set_proxy_reward(self, weights):
         """
-        Set the proxy reward weights (what designer gave to agent).
+        Set the proxy reward weights and initialize prior around them.
+        
+        FIX: Prior is now centered at proxy_weights, not zero!
+        This means we start with beliefs close to the proxy reward.
         
         @param weights: array of shape (feature_dim,)
         """
         self.proxy_weights = np.array(weights, dtype=np.float32)
         assert len(self.proxy_weights) == self.feature_dim
+        
+        # FIX: Center prior around proxy weights
+        self.prior_mean = self.proxy_weights.copy()
+        
+        # Initialize posterior samples from prior (centered at proxy)
+        self.posterior_samples = np.random.multivariate_normal(
+            self.prior_mean,
+            self.prior_cov,
+            size=self.num_samples
+        )
     
     def compute_features(self, world, trajectory):
         """
@@ -73,11 +82,11 @@ class BayesianRewardModel:
         IMPORTANT: Does NOT modify world state - uses deep copy.
         
         Features:
-        1. Seeds collected
-        2. Time spent under clouds
-        3. Battery depletion events
-        4. Average movement per step
-        5. Final battery level (normalized)
+        1. Seeds collected (positive is good)
+        2. Time spent under clouds (negative is good -> want negative weight)
+        3. Battery depletion events (negative is good -> want negative weight)
+        4. Average movement per step (can be positive or negative)
+        5. Final battery level normalized (positive is good)
         
         @param world: SciWrld instance
         @param trajectory: list of (row, col) positions
@@ -117,6 +126,7 @@ class BayesianRewardModel:
             # Feature 3: Battery depletion
             if battery <= 0:
                 battery_depletions += 1
+                battery = 0  # Can't go negative
             
             # Feature 4: Distance traveled
             total_distance += abs(pos[0] - prev_pos[0]) + abs(pos[1] - prev_pos[1])
@@ -161,31 +171,54 @@ class BayesianRewardModel:
         
         return np.mean(rewards), np.var(rewards)
     
-    def update_posterior(self, preferred_trajectory, world, temperature=1.0):
+    def update_posterior_pairwise(self, traj1, world1, traj2, world2, preferred_idx, temperature=1.0):
         """
-        Update posterior based on observed human preference.
+        FIX: Update posterior using PAIRWISE preference (Bradley-Terry model).
         
-        Uses importance sampling: trajectories preferred by humans should have
-        higher reward under the true reward function.
+        This is the correct way to learn from preferences!
         
-        @param preferred_trajectory: trajectory that human preferred
-        @param world: SciWrld instance
-        @param temperature: softmax temperature for likelihood
+        Likelihood: P(traj_i > traj_j | w) = σ((r_w(traj_i) - r_w(traj_j)) / τ)
+        where σ is the sigmoid function.
+        
+        @param traj1: first trajectory
+        @param world1: world state for traj1
+        @param traj2: second trajectory  
+        @param world2: world state for traj2
+        @param preferred_idx: 0 if traj1 preferred, 1 if traj2 preferred
+        @param temperature: softmax temperature
         """
         if self.proxy_weights is None:
             raise ValueError("Must set proxy_weights before updating posterior")
         
-        # Compute features for preferred trajectory
-        features = self.compute_features(world, preferred_trajectory)
+        # Compute features for both trajectories
+        features1 = self.compute_features(world1, traj1)
+        features2 = self.compute_features(world2, traj2)
         
-        # Compute log-likelihood for each posterior sample
-        # Higher reward under candidate weights → more likely to be true weights
+        # Feature difference: positive if preferred is traj1, negative if traj2
+        if preferred_idx == 0:
+            # traj1 preferred
+            feat_diff = features1 - features2
+        else:
+            # traj2 preferred
+            feat_diff = features2 - features1
+        
+        # Compute log-likelihood for each posterior sample using Bradley-Terry
         log_likelihoods = []
         
         for w_candidate in self.posterior_samples:
-            candidate_reward = self.compute_reward(features, w_candidate)
-            # Likelihood: softmax over reward
-            log_likelihood = candidate_reward / temperature
+            # Reward difference (positive means preferred traj has higher reward)
+            reward_diff = np.dot(w_candidate, feat_diff)
+            
+            # Bradley-Terry log-likelihood: log(sigmoid(reward_diff / temperature))
+            # = -log(1 + exp(-reward_diff / temperature))
+            scaled_diff = reward_diff / temperature
+            
+            # Numerically stable log-sigmoid
+            if scaled_diff > 0:
+                log_likelihood = -np.log1p(np.exp(-scaled_diff))
+            else:
+                log_likelihood = scaled_diff - np.log1p(np.exp(scaled_diff))
+            
             log_likelihoods.append(log_likelihood)
         
         log_likelihoods = np.array(log_likelihoods)
@@ -193,6 +226,9 @@ class BayesianRewardModel:
         # Importance resampling
         weights = np.exp(log_likelihoods - np.max(log_likelihoods))
         weights /= weights.sum()
+        
+        # Check for weight collapse
+        effective_samples = 1.0 / np.sum(weights ** 2)
         
         # Resample
         indices = np.random.choice(
@@ -204,6 +240,53 @@ class BayesianRewardModel:
         self.posterior_samples = self.posterior_samples[indices].copy()
         
         # Add small noise to maintain diversity (prevent collapse)
+        # Scale noise based on effective sample size
+        noise_scale = 0.05 * (1.0 - effective_samples / self.num_samples)
+        noise = np.random.multivariate_normal(
+            np.zeros(self.feature_dim),
+            np.eye(self.feature_dim) * noise_scale,
+            size=self.num_samples
+        )
+        self.posterior_samples += noise
+    
+    def update_posterior(self, preferred_trajectory, world, temperature=1.0):
+        """
+        DEPRECATED: Single-trajectory update (keeps for compatibility but warns).
+        
+        This method is kept for backward compatibility but should not be used.
+        Use update_posterior_pairwise instead!
+        """
+        import warnings
+        warnings.warn(
+            "update_posterior(single trajectory) is deprecated. "
+            "Use update_posterior_pairwise(traj1, world1, traj2, world2, preferred_idx) instead.",
+            DeprecationWarning
+        )
+        
+        # Fall back to old behavior (biased toward positive weights)
+        if self.proxy_weights is None:
+            raise ValueError("Must set proxy_weights before updating posterior")
+        
+        features = self.compute_features(world, preferred_trajectory)
+        
+        log_likelihoods = []
+        for w_candidate in self.posterior_samples:
+            candidate_reward = self.compute_reward(features, w_candidate)
+            log_likelihood = candidate_reward / temperature
+            log_likelihoods.append(log_likelihood)
+        
+        log_likelihoods = np.array(log_likelihoods)
+        weights = np.exp(log_likelihoods - np.max(log_likelihoods))
+        weights /= weights.sum()
+        
+        indices = np.random.choice(
+            self.num_samples,
+            size=self.num_samples,
+            p=weights,
+            replace=True
+        )
+        self.posterior_samples = self.posterior_samples[indices].copy()
+        
         noise = np.random.multivariate_normal(
             np.zeros(self.feature_dim),
             np.eye(self.feature_dim) * 0.01,
@@ -218,7 +301,6 @@ class BayesianRewardModel:
     def get_std_weights(self):
         """Get posterior standard deviation of weights."""
         return np.std(self.posterior_samples, axis=0)
-
 
 class NeuralRewardModel(nn.Module):
     """
@@ -320,11 +402,6 @@ class NeuralRewardEnsemble:
     def eval(self):
         """Set evaluation mode."""
         self.train(False)
-
-
-# =============================================================================
-# Reward Functions (no side effects!)
-# =============================================================================
 
 def compute_true_reward(world, trajectory):
     """

@@ -296,10 +296,10 @@ class IRDRLHFTrainer:
             
             # Update IRD posterior if using that method
             if self.uncertainty_method == 'ird':
-                preferred_traj = traj1 if preferred_idx == 0 else traj2
-                preferred_world = world1 if preferred_idx == 0 else world2
-                self.reward_model.update_posterior(preferred_traj, preferred_world)
-        
+                self.reward_model.update_posterior_pairwise(
+                    traj1, world1, traj2, world2, preferred_idx
+                )        
+                
         print(f"\n✓ Collected {num_preferences} preferences!")
         
         # Train neural reward model if using ensemble or random
