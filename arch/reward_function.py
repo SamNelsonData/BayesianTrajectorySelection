@@ -250,12 +250,7 @@ class BayesianRewardModel:
         self.posterior_samples += noise
     
     def update_posterior(self, preferred_trajectory, world, temperature=1.0):
-        """
-        DEPRECATED: Single-trajectory update (keeps for compatibility but warns).
-        
-        This method is kept for backward compatibility but should not be used.
-        Use update_posterior_pairwise instead!
-        """
+ 
         import warnings
         warnings.warn(
             "update_posterior(single trajectory) is deprecated. "
@@ -295,11 +290,9 @@ class BayesianRewardModel:
         self.posterior_samples += noise
     
     def get_mean_weights(self):
-        """Get posterior mean of weights."""
         return np.mean(self.posterior_samples, axis=0)
     
     def get_std_weights(self):
-        """Get posterior standard deviation of weights."""
         return np.std(self.posterior_samples, axis=0)
 
 class NeuralRewardModel(nn.Module):
@@ -325,23 +318,12 @@ class NeuralRewardModel(nn.Module):
         )
     
     def forward(self, states):
-        """
-        Compute reward for each state.
-        
-        @param states: tensor of shape (batch, state_dim) or (state_dim,)
-        @return: rewards of shape (batch, 1) or (1,)
-        """
+
         if states.dim() == 1:
             states = states.unsqueeze(0)
         return self.net(states)
     
     def predict_trajectory_reward(self, trajectory_states):
-        """
-        Compute total reward for a trajectory.
-        
-        @param trajectory_states: array/tensor of shape (T, state_dim)
-        @return: scalar tensor (for backprop)
-        """
         if not isinstance(trajectory_states, torch.Tensor):
             trajectory_states = torch.tensor(trajectory_states, dtype=torch.float32)
         
@@ -360,11 +342,7 @@ class NeuralRewardEnsemble:
     """
     
     def __init__(self, state_dim=7, hidden_dim=64, num_models=5):
-        """
-        @param state_dim: input dimension
-        @param hidden_dim: hidden layer size
-        @param num_models: number of ensemble members
-        """
+
         self.num_models = num_models
         self.models = nn.ModuleList([
             NeuralRewardModel(state_dim, hidden_dim)
@@ -404,18 +382,7 @@ class NeuralRewardEnsemble:
         self.train(False)
 
 def compute_true_reward(world, trajectory):
-    """
-    Compute the TRUE reward for a trajectory.
     
-    This is what we want the agent to actually optimize.
-    Includes safety constraints that proxy might miss.
-    
-    IMPORTANT: Does NOT modify world state.
-    
-    @param world: SciWrld instance
-    @param trajectory: list of positions
-    @return: total reward (float)
-    """
     world_copy = deepcopy(world)
     
     total_reward = 0.0
@@ -452,10 +419,6 @@ def compute_proxy_reward(world, trajectory):
     
     This is intentionally simpler than true reward - it might miss
     important safety constraints like battery management.
-    
-    @param world: SciWrld instance
-    @param trajectory: list of positions
-    @return: total reward (float)
     """
     world_copy = deepcopy(world)
     
@@ -476,15 +439,7 @@ def compute_proxy_reward(world, trajectory):
 
 
 def encode_trajectory_states(world, trajectory):
-    """
-    Convert trajectory to encoded states for neural models.
-    
-    IMPORTANT: Does NOT modify world state.
-    
-    @param world: SciWrld instance
-    @param trajectory: list of positions
-    @return: array of shape (len(trajectory), state_dim)
-    """
+
     from arch.sciwrld import encode_state
     
     # Work on copy to avoid side effects

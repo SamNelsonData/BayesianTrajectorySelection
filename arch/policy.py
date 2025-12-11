@@ -11,8 +11,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import numpy as np
-from copy import deepcopy
 
+from arch.reward_function import encode_trajectory_states
 
 class PolicyNetwork(nn.Module):
     """
@@ -37,12 +37,7 @@ class PolicyNetwork(nn.Module):
         self.num_actions = num_actions
     
     def forward(self, state):
-        """
-        Compute action probabilities.
-        
-        @param state: tensor of shape (batch, input_dim) or (input_dim,)
-        @return: probabilities of shape (batch, num_actions)
-        """
+
         if not torch.is_tensor(state):
             state = torch.tensor(state, dtype=torch.float32)
         
@@ -55,13 +50,7 @@ class PolicyNetwork(nn.Module):
         return probs
     
     def get_action(self, state, deterministic=False):
-        """
-        Sample action from policy.
-        
-        @param state: state tensor
-        @param deterministic: if True, return argmax action
-        @return: (action, log_prob)
-        """
+
         probs = self.forward(state)
         
         if deterministic:
@@ -75,13 +64,7 @@ class PolicyNetwork(nn.Module):
         return action, log_prob
     
     def evaluate_action(self, state, action):
-        """
-        Evaluate log probability and entropy for a given action.
-        
-        @param state: state tensor
-        @param action: action tensor
-        @return: (log_prob, entropy)
-        """
+
         probs = self.forward(state)
         dist = torch.distributions.Categorical(probs)
         
@@ -176,14 +159,10 @@ class PolicyTrainer:
                 print(f"  Avg Length (last 100): {avg_length:.1f}")
         
         if verbose:
-            print("\n✓ Policy training complete!")
+            print("\nPolicy training complete!")
     
     def _run_episode(self, env, max_steps):
-        """
-        Run one episode and update policy.
-        
-        @return: (total_reward, episode_length)
-        """
+
         states = []
         actions = []
         log_probs = []
@@ -242,7 +221,6 @@ class PolicyTrainer:
         
         # NeuralRewardModel
         elif hasattr(self.reward_model, 'predict_trajectory_reward'):
-            from arch.reward_model import encode_trajectory_states
             states = encode_trajectory_states(env, trajectory)
             states_tensor = torch.tensor(states, dtype=torch.float32)
             
