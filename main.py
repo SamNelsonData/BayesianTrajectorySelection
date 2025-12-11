@@ -1,81 +1,86 @@
-"""
-Training script combining Inverse Reward Design with RLHF.
-
-Key innovation: Use Bayesian posterior over reward functions to select
-trajectory segments with high uncertainty for human labeling.
-
-This reduces the number of human labels needed compared to:
-1. Random selection (baseline)
-2. Ensemble variance (Christiano et al. 2017)
-
-Usage:
-    python train_ird.py --method ird --num_preferences 50
-"""
-
-import torch
+import argparse
 import numpy as np
+import matplotlib.pyplot as plt
+from copy import deepcopy
+
 from arch.sciwrld import SciWrld, encode_state
-from arch.agents import Agent, AgentA2C
-from arch.policy import PolicyNetwork
+from arch.agents import Agent, PolicyAgent, trajectory_similarity
 from arch.reward_function import (
     BayesianRewardModel,
+    NeuralRewardModel,
     NeuralRewardEnsemble,
-    proxy_reward_function,
-    true_reward_function,
+    compute_true_reward,
     encode_trajectory_states
 )
-from arch.preference_learning import PreferenceDataset, PreferenceLearner
-import argparse
-from copy import deepcopy
-import matplotlib.pyplot as plt
+from arch.preference_learning import (
+    PreferenceDataset,
+    PreferenceLearner,
+    EnsemblePreferenceLearner
+)
+from arch.policy import PolicyNetwork, PolicyTrainer
 
 
 class IRDRLHFTrainer:
     """
-    Trainer that combines:
-    1. Inverse Reward Design (IRD) for trajectory selection
-    2. Human preferences for reward learning
-    3. Policy optimization using learned rewards
+    Trainer combining IRD trajectory selection with RLHF.
+    
+    Pipeline:
+    1. Generate candidate trajectories
+    2. Select high-uncertainty pairs using IRD/ensemble/random
+    3. Collect human preferences
+    4. Update reward model
+    5. (Optional) Train policy on learned reward
     """
     
     def __init__(
         self,
         world_size=(12, 12),
-        feature_dim=5,
         state_dim=7,
+        feature_dim=5,
         hidden_dim=64,
         uncertainty_method='ird',  # 'ird', 'ensemble', or 'random'
         num_posterior_samples=100
     ):
         """
+        @param world_size: (rows, cols) for environment
+        @param state_dim: encoded state dimension
+        @param feature_dim: number of trajectory features (for IRD)
+        @param hidden_dim: hidden layer size for neural models
         @param uncertainty_method: how to select trajectories
-            - 'ird': Bayesian IRD posterior variance
-            - 'ensemble': Neural ensemble variance (Christiano et al.)
-            - 'random': Random selection (baseline)
         """
         self.world_size = world_size
+        self.state_dim = state_dim
         self.uncertainty_method = uncertainty_method
         
-        # Initialize environment
-        self.world = SciWrld(size=world_size, starting_seeds=5, rocks=15)
+        # Environment parameters
+        self.env_kwargs = {
+            'size': world_size,
+            'num_seeds': 5,
+            'num_rocks': 15
+        }
         
-        # Initialize policy
+        # Initialize world (will be reset for each trajectory)
+        self.world = None
+        
+        # Initialize policy (used after reward learning)
         self.policy = PolicyNetwork(
             input_dim=state_dim,
             hidden_dim=hidden_dim,
             num_actions=4
         )
         
-        # Initialize reward uncertainty model based on method
+        # Initialize reward model based on method
         if uncertainty_method == 'ird':
             self.reward_model = BayesianRewardModel(
                 feature_dim=feature_dim,
                 num_samples=num_posterior_samples,
                 prior_std=1.0
             )
-            # Set proxy reward (what designer gave to agent)
+            # Set proxy reward weights
+            # [seeds, clouds, battery_depletion, movement, final_battery]
             proxy_weights = np.array([10.0, -1.0, -5.0, -0.5, 2.0])
             self.reward_model.set_proxy_reward(proxy_weights)
+            self.preference_learner = None  # IRD doesn't need neural learner
             
         elif uncertainty_method == 'ensemble':
             self.reward_model = NeuralRewardEnsemble(
@@ -83,13 +88,22 @@ class IRDRLHFTrainer:
                 hidden_dim=hidden_dim,
                 num_models=5
             )
-            # Will need to train ensemble from preferences
-            self.preference_learner = None  # TODO: add ensemble training
+            self.preference_learner = EnsemblePreferenceLearner(
+                self.reward_model,
+                learning_rate=1e-3
+            )
             
         else:  # random
-            self.reward_model = None
+            self.reward_model = NeuralRewardModel(
+                state_dim=state_dim,
+                hidden_dim=hidden_dim
+            )
+            self.preference_learner = PreferenceLearner(
+                self.reward_model,
+                learning_rate=1e-3
+            )
         
-        # Dataset for human preferences
+        # Preference dataset
         self.preference_dataset = PreferenceDataset()
         
         # Tracking
@@ -97,121 +111,125 @@ class IRDRLHFTrainer:
         self.correlation_history = []
         
         print(f"IRD-RLHF Trainer initialized!")
-        print(f"Uncertainty method: {uncertainty_method}")
-        print(f"World size: {world_size}")
+        print(f"  Uncertainty method: {uncertainty_method}")
+        print(f"  World size: {world_size}")
     
-    def reset_world(self, rng_seed=None):
-        """Create fresh world instance with clouds and seeds."""
-        if rng_seed is not None:
-            np.random.seed(rng_seed)
-        self.world = SciWrld(
-            size=self.world_size,
-            starting_seeds=5,
-            rocks=15
-        )
+    def create_world(self, seed=None):
+        """Create a new world instance."""
+        world = SciWrld(**self.env_kwargs, random_seed=seed)
         
-        # Add some clouds for variety
-        for _ in range(2):
-            self.world.step(
-                steps=0,  # Don't move clouds yet
-                new_cloud_rate=1.0,  # Force cloud generation
-                cloud_limit=3,
-                cloud_size=4
-            )
+        # Add some clouds
+        for _ in range(3):
+            world.step(new_cloud_rate=0.5, cloud_limit=3, cloud_size=4)
         
-        self.world.add_agent(Agent)
+        return world
     
     def generate_trajectory_candidates(self, num_candidates=20, steps=8):
         """
-        Generate multiple trajectory candidates for selection.
-        NOW RETURNS: (trajectory, world_snapshot) pairs
+        Generate trajectory candidates with their world states.
         
-        @param num_candidates: number of trajectories to generate
-        @param steps: trajectory length
+        Each trajectory is generated in its own world instance to ensure
+        proper state tracking.
+        
         @return: list of (trajectory, world) tuples
         """
         candidates = []
         
         for i in range(num_candidates):
-            self.reset_world()
+            # Create fresh world
+            world = self.create_world(seed=np.random.randint(0, 100000))
+            world.add_agent(Agent)
             
             # Generate random trajectory
-            seed_val = np.random.randint(0, 100000)
-            traj = self.world.agent.gen_trajectory(
-                seeded=seed_val,
-                steps=steps
+            traj = world.agent.generate_trajectory(
+                steps=steps,
+                seed=np.random.randint(0, 100000)
             )
             
-            # Store trajectory WITH its world state
-            world_snapshot = deepcopy(self.world)
-            candidates.append((traj, world_snapshot))
+            candidates.append((traj, world))
         
         return candidates
     
     def compute_trajectory_uncertainty(self, trajectory, world):
         """
-        Compute uncertainty for a trajectory using selected method.
+        Compute uncertainty for a trajectory.
         
-        @param trajectory: list of positions
-        @param world: the world state where this trajectory exists
         @return: (mean_reward, uncertainty)
         """
         if self.uncertainty_method == 'ird':
-            mean_reward, variance = self.reward_model.compute_reward_uncertainty(
-                world, trajectory
-            )
-            return mean_reward, variance
+            return self.reward_model.compute_reward_uncertainty(world, trajectory)
             
         elif self.uncertainty_method == 'ensemble':
-            trajectory_states = encode_trajectory_states(world, trajectory)
-            mean_reward, variance = self.reward_model.predict_trajectory_reward(
-                trajectory_states
-            )
-            return mean_reward, variance
+            states = encode_trajectory_states(world, trajectory)
+            return self.reward_model.predict_trajectory_reward(states)
             
         else:  # random
-            # Return random uncertainty
             return 0.0, np.random.rand()
     
-    def select_high_uncertainty_pairs(self, num_pairs=10, candidates_per_pair=20, steps=8):
+    def select_high_uncertainty_pairs(
+        self,
+        num_pairs=10,
+        candidates_per_pair=20,
+        steps=8,
+        min_diversity=0.5
+    ):
         """
         Select trajectory pairs with highest uncertainty for labeling.
         
-        This is the key innovation: instead of random pairs, select pairs
-        where the reward model is most uncertain.
-        
-        @param num_pairs: number of trajectory pairs to select
-        @param candidates_per_pair: number of candidates to consider per pair
+        @param num_pairs: number of pairs to select
+        @param candidates_per_pair: candidates to generate per selection
         @param steps: trajectory length
+        @param min_diversity: minimum trajectory difference (0-1)
         @return: list of (traj1, world1, traj2, world2, unc1, unc2) tuples
         """
         selected_pairs = []
         
-        print(f"\nGenerating and selecting high-uncertainty trajectory pairs...")
+        print(f"\nSelecting {num_pairs} high-uncertainty trajectory pairs...")
         print(f"Method: {self.uncertainty_method}")
         
         for pair_idx in range(num_pairs):
-            # Generate candidate trajectories WITH their world states
+            # Generate candidates
             candidates = self.generate_trajectory_candidates(
                 num_candidates=candidates_per_pair,
                 steps=steps
             )
             
-            # Compute uncertainty for each candidate
+            # Compute uncertainty for each
             uncertainties = []
             for traj, world in candidates:
-                _, uncertainty = self.compute_trajectory_uncertainty(traj, world)
-                uncertainties.append(uncertainty)
+                _, unc = self.compute_trajectory_uncertainty(traj, world)
+                uncertainties.append(unc)
             
             uncertainties = np.array(uncertainties)
             
-            # Select top 2 with highest uncertainty
-            top_indices = np.argsort(uncertainties)[-2:]
+            # Sort by uncertainty (descending)
+            sorted_indices = np.argsort(uncertainties)[::-1]
             
-            traj1, world1 = candidates[top_indices[0]]
-            traj2, world2 = candidates[top_indices[1]]
-            unc1 = uncertainties[top_indices[0]]
-            unc2 = uncertainties[top_indices[1]]
+            # Find diverse pair with high uncertainty
+            best_pair = None
+            best_unc_sum = -1
+            
+            for i, idx1 in enumerate(sorted_indices[:10]):
+                for idx2 in sorted_indices[i+1:15]:
+                    traj1, _ = candidates[idx1]
+                    traj2, _ = candidates[idx2]
+                    
+                    # Check diversity
+                    sim = trajectory_similarity(traj1, traj2)
+                    if sim <= (1 - min_diversity):
+                        unc_sum = uncertainties[idx1] + uncertainties[idx2]
+                        if unc_sum > best_unc_sum:
+                            best_unc_sum = unc_sum
+                            best_pair = (idx1, idx2)
+            
+            # Fallback: just take top 2 if no diverse pair found
+            if best_pair is None:
+                best_pair = (sorted_indices[0], sorted_indices[1])
+            
+            idx1, idx2 = best_pair
+            traj1, world1 = candidates[idx1]
+            traj2, world2 = candidates[idx2]
+            unc1, unc2 = uncertainties[idx1], uncertainties[idx2]
             
             selected_pairs.append((traj1, world1, traj2, world2, unc1, unc2))
             
@@ -219,27 +237,29 @@ class IRDRLHFTrainer:
             self.uncertainty_history.append(mean_unc)
             
             if (pair_idx + 1) % 5 == 0:
-                print(f"  Selected {pair_idx + 1}/{num_pairs} pairs, "
-                      f"avg uncertainty: {mean_unc:.4f}")
+                print(f"  Selected {pair_idx+1}/{num_pairs} pairs, avg unc: {mean_unc:.4f}")
         
         return selected_pairs
     
-    def collect_preferences_with_uncertainty(
+    def collect_preferences(
         self,
         num_preferences=50,
         candidates_per_pair=20,
-        steps=8
+        steps=8,
+        simulated=False
     ):
         """
-        Collect human preferences, prioritizing high-uncertainty trajectories.
+        Collect human preferences on high-uncertainty trajectory pairs.
         
         @param num_preferences: number of preferences to collect
-        @param candidates_per_pair: candidates to generate per selection
+        @param candidates_per_pair: candidates per selection
         @param steps: trajectory length
+        @param simulated: if True, use true reward instead of human input
         """
         print(f"\n{'='*60}")
-        print(f"COLLECTING PREFERENCES WITH UNCERTAINTY SELECTION")
+        print("COLLECTING PREFERENCES")
         print(f"Method: {self.uncertainty_method}")
+        print(f"Simulated: {simulated}")
         print(f"{'='*60}\n")
         
         # Select high-uncertainty pairs
@@ -249,71 +269,61 @@ class IRDRLHFTrainer:
             steps=steps
         )
         
-        # Collect human preferences for each pair
+        # Collect preferences
         for i, (traj1, world1, traj2, world2, unc1, unc2) in enumerate(selected_pairs):
             print(f"\n--- Preference {i+1}/{num_preferences} ---")
-            print(f"Trajectory 1 uncertainty: {unc1:.4f}")
-            print(f"Trajectory 2 uncertainty: {unc2:.4f}")
+            print(f"Uncertainty: traj1={unc1:.4f}, traj2={unc2:.4f}")
             
-            # Get human preference (NOW PASSING THE CORRECT WORLDS!)
-            preferred_idx = self.show_and_get_preference(traj1, world1, traj2, world2)
+            if simulated:
+                # Use true reward as oracle
+                true_rew1 = compute_true_reward(world1, traj1)
+                true_rew2 = compute_true_reward(world2, traj2)
+                preferred_idx = 0 if true_rew1 >= true_rew2 else 1
+                print(f"[Simulated] True rewards: {true_rew1:.2f} vs {true_rew2:.2f}")
+                print(f"[Simulated] Preferred: trajectory {preferred_idx + 1}")
+            else:
+                # Get actual human preference
+                preferred_idx = self._show_and_get_preference(
+                    traj1, world1, traj2, world2
+                )
             
-            # Encode trajectories with their respective worlds
-            traj1_states = encode_trajectory_states(world1, traj1)
-            traj2_states = encode_trajectory_states(world2, traj2)
+            # Encode trajectories
+            states1 = encode_trajectory_states(world1, traj1)
+            states2 = encode_trajectory_states(world2, traj2)
             
             # Add to dataset
-            self.preference_dataset.add_preference(
-                traj1_states,
-                traj2_states,
-                preferred_idx
-            )
-            
-            print(f"✓ Preference recorded: Trajectory {preferred_idx + 1}")
+            self.preference_dataset.add_preference(states1, states2, preferred_idx)
             
             # Update IRD posterior if using that method
             if self.uncertainty_method == 'ird':
-                if preferred_idx == 0:
-                    self.reward_model.update_posterior([traj1], world1, temperature=1.0)
-                else:
-                    self.reward_model.update_posterior([traj2], world2, temperature=1.0)
+                preferred_traj = traj1 if preferred_idx == 0 else traj2
+                preferred_world = world1 if preferred_idx == 0 else world2
+                self.reward_model.update_posterior(preferred_traj, preferred_world)
         
         print(f"\n✓ Collected {num_preferences} preferences!")
+        
+        # Train neural reward model if using ensemble or random
+        if self.preference_learner is not None and len(self.preference_dataset) > 0:
+            print("\nTraining reward model from preferences...")
+            self.preference_learner.train(
+                self.preference_dataset,
+                epochs=50,
+                batch_size=16
+            )
     
-    def show_and_get_preference(self, traj1, world1, traj2, world2):
+    def _show_and_get_preference(self, traj1, world1, traj2, world2):
         """
         Display trajectories and get human preference.
-        Uses CORRECT world states for each trajectory.
-        
-        @param traj1: first trajectory
-        @param world1: world state for trajectory 1
-        @param traj2: second trajectory  
-        @param world2: world state for trajectory 2
-        @return: preferred index (0 or 1)
         """
+        print("\n--- TRAJECTORY 1 ---")
+        print(world1.render(trajectory=traj1))
+        true_rew1 = compute_true_reward(world1, traj1)
+        print(f"[Hidden] True reward: {true_rew1:.2f}")
         
-        
-        # print("\n--- TRAJECTORY 1 ---")
-        true_rew1 = self._simulate_and_display_trajectory(world1, traj1)
-
-        # print("\n--- TRAJECTORY 2 ---")
-        true_rew2 = self._simulate_and_display_trajectory(world2, traj2)
-    
-        # print(f"\n[Hidden] True rewards: Traj1={true_rew1:.2f}, Traj2={true_rew2:.2f}")
-        
-        # from utils.visualiser import TrajectoryVisualizer
-        
-        print(f"\n[Hidden] True rewards: Traj1={true_rew1:.2f}, Traj2={true_rew2:.2f}")
-        
-        # Show beautiful visualization
-        # viz = TrajectoryVisualizer()
-        # viz.show_trajectory_pair(
-        #     world1, traj1, world2, traj2,
-        #     reward1=None,  # Don't show reward to human
-        #     reward2=None,
-        #     title1="Trajectory 1",
-        #     title2="Trajectory 2"
-        # )
+        print("\n--- TRAJECTORY 2 ---")
+        print(world2.render(trajectory=traj2))
+        true_rew2 = compute_true_reward(world2, traj2)
+        print(f"[Hidden] True reward: {true_rew2:.2f}")
         
         while True:
             try:
@@ -324,199 +334,112 @@ class IRDRLHFTrainer:
             except (ValueError, KeyboardInterrupt):
                 print("Please enter 1 or 2")
     
-    def _simulate_and_display_trajectory(self, world, trajectory):
+    def evaluate_sample_efficiency(self, num_test=20):
         """
-        Simulate and display a trajectory with the world state.
-        Shows the gridworld with trajectory path overlaid.
-        
-        @param world: SciWrld instance
-        @param trajectory: list of positions
-        @return: total true reward
-        """
-        # Visualize the trajectory on the world
-        self._visualize_trajectory_on_world(world, trajectory)
-        
-        # Simulate the trajectory and compute true reward
-        total_reward = 0.0
-        seeds_collected = 0
-        time_under_clouds = 0
-        battery_warnings = 0
-        
-        world.agent.position = trajectory[0]
-        world.agent.battery = 2  # Reset battery
-        
-        for i, pos in enumerate(trajectory):
-            world.agent.position = pos
-            
-            # Living penalty
-            step_reward = -0.1
-            
-            # Check for seed collection BEFORE moving there
-            if world.world[pos] == world.item_to_value['Seed']:
-                seeds_collected += 1
-                step_reward += 10.0  # Seed reward
-                world.world[pos] = world.item_to_value['Sand']  # Remove seed
-            
-            # Check for clouds
-            under_cloud = False
-            for cloud, _ in world.clouds:
-                if pos in cloud:
-                    under_cloud = True
-                    time_under_clouds += 1
-                    world.agent.battery -= 1
-                    step_reward -= 5.0  # Cloud penalty
-                    break
-            
-            # Recharge in sunlight
-            if not under_cloud and world.agent.battery < 2:
-                world.agent.battery += 1
-            
-            # Battery depletion penalty
-            if world.agent.battery <= 0:
-                battery_warnings += 1
-                step_reward -= 20.0
-            
-            total_reward += step_reward
-        
-        # Print summary
-        print(f"Seeds collected: {seeds_collected}")
-        print(f"Time under clouds: {time_under_clouds}")
-        print(f"Battery warnings: {battery_warnings}")
-        print(f"Total reward: {total_reward:.2f}")
-        
-        return total_reward
-    
-    def _visualize_trajectory_on_world(self, world, trajectory):
-        """
-        Display the world with trajectory path overlaid.
-        """
-        # Create a visual representation
-        direction_symbols = {
-            (0, -1): '←',
-            (0, 1): '→',
-            (-1, 0): '↑',
-            (1, 0): '↓',
-            (0, 0): '•'
-        }
-        
-        # Build trajectory map
-        traj_map = {}
-        for i in range(len(trajectory) - 1):
-            pos = trajectory[i]
-            next_pos = trajectory[i + 1]
-            direction = (next_pos[0] - pos[0], next_pos[1] - pos[1])
-            traj_map[pos] = direction_symbols.get(direction, '•')
-        
-        # Mark end position
-        if trajectory:
-            traj_map[trajectory[-1]] = '⊗'
-        
-        # Print the world
-        for r in range(world.size[0]):
-            row_str = ""
-            for c in range(world.size[1]):
-                pos = (r, c)
-                
-                # Check if there's a trajectory marker here
-                if pos in traj_map:
-                    symbol = traj_map[pos]
-                else:
-                    # Show world element
-                    val = world.world[pos]
-                    symbol = world.value_to_symbol[val]
-                    
-                    # Override with cloud if present
-                    for cloud, _ in world.clouds:
-                        if pos in cloud:
-                            symbol = '⛆'
-                            break
-                
-                row_str += f'{symbol:<2}'
-            print(row_str)
-        print()
-    
-    def evaluate_sample_efficiency(self, num_trials=5):
-        """
-        Compare sample efficiency across uncertainty methods.
-        
-        Measures how quickly learned reward correlates with true reward
-        as a function of number of labeled pairs.
-        
-        @param num_trials: number of evaluation trials
-        @return: dict of results
+        Evaluate how well learned reward correlates with true reward.
         """
         print(f"\n{'='*60}")
         print("EVALUATING SAMPLE EFFICIENCY")
         print(f"{'='*60}\n")
         
-        correlations = []
+        # Generate test trajectories
+        test_candidates = self.generate_trajectory_candidates(
+            num_candidates=num_test,
+            steps=8
+        )
         
-        for trial in range(num_trials):
-            # Generate test trajectories
-            test_trajs = self.generate_trajectory_candidates(
-                num_candidates=20,
-                steps=8
-            )
-            
-            true_rewards = []
-            learned_rewards = []
-            
-            for traj in test_trajs:
-                # True reward
-                true_rew = sum(true_reward_function(self.world, pos) for pos in traj[0])      
-                true_rewards.append(true_rew)
-                
-                # Learned reward (mean of posterior)
-                if self.uncertainty_method == 'ird':
-                    mean_rew, _ = self.reward_model.compute_reward_uncertainty(
-                        self.world, traj[0]
-                    )
-                    learned_rewards.append(mean_rew)
-                # TODO: Add ensemble evaluation
-            
-            # Compute correlation
-            if len(true_rewards) > 1:
-                corr = np.corrcoef(true_rewards, learned_rewards)[0, 1]
-                correlations.append(corr)
-                self.correlation_history.append(corr)
+        true_rewards = []
+        learned_rewards = []
         
-        avg_corr = np.mean(correlations)
-        print(f"Average correlation with true reward: {avg_corr:.4f}")
+        for traj, world in test_candidates:
+            # True reward
+            true_rew = compute_true_reward(world, traj)
+            true_rewards.append(true_rew)
+            
+            # Learned reward
+            if self.uncertainty_method == 'ird':
+                mean_rew, _ = self.reward_model.compute_reward_uncertainty(world, traj)
+            elif self.uncertainty_method == 'ensemble':
+                states = encode_trajectory_states(world, traj)
+                mean_rew, _ = self.reward_model.predict_trajectory_reward(states)
+            else:
+                states = encode_trajectory_states(world, traj)
+                import torch
+                self.reward_model.eval()
+                with torch.no_grad():
+                    mean_rew = self.reward_model.predict_trajectory_reward(
+                        torch.tensor(states, dtype=torch.float32)
+                    ).item()
+            
+            learned_rewards.append(mean_rew)
+        
+        # Compute correlation
+        corr = np.corrcoef(true_rewards, learned_rewards)[0, 1]
+        self.correlation_history.append(corr)
+        
+        print(f"Correlation with true reward: {corr:.4f}")
+        print(f"Preferences collected: {len(self.preference_dataset)}")
         
         return {
-            'correlations': correlations,
-            'avg_correlation': avg_corr,
-            'method': self.uncertainty_method
+            'correlation': corr,
+            'num_preferences': len(self.preference_dataset),
+            'true_rewards': true_rewards,
+            'learned_rewards': learned_rewards
         }
     
-    def plot_results(self):
-        """Plot uncertainty and correlation over time."""
+    def train_policy(self, num_episodes=500, max_steps=20):
+        """
+        Train policy to maximize learned reward.
+        """
+        trainer = PolicyTrainer(
+            policy=self.policy,
+            reward_model=self.reward_model,
+            learning_rate=3e-4,
+            gamma=0.99
+        )
+        
+        trainer.train(
+            env_class=SciWrld,
+            env_kwargs=self.env_kwargs,
+            agent_class=PolicyAgent,
+            num_episodes=num_episodes,
+            max_steps=max_steps
+        )
+        
+        return trainer
+    
+    def plot_results(self, save_path=None):
+        """Plot training progress."""
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
         
-        # Plot uncertainty over time
-        ax1.plot(self.uncertainty_history)
-        ax1.set_xlabel('Preference Pair')
-        ax1.set_ylabel('Average Uncertainty')
-        ax1.set_title(f'Uncertainty Over Time ({self.uncertainty_method})')
-        ax1.grid(True)
+        # Uncertainty over time
+        if self.uncertainty_history:
+            ax1.plot(self.uncertainty_history)
+            ax1.set_xlabel('Preference Pair')
+            ax1.set_ylabel('Average Uncertainty')
+            ax1.set_title(f'Uncertainty ({self.uncertainty_method})')
+            ax1.grid(True, alpha=0.3)
         
-        # Plot correlation over time
-        ax2.plot(self.correlation_history)
-        ax2.set_xlabel('Evaluation')
-        ax2.set_ylabel('Correlation with True Reward')
-        ax2.set_title(f'Learning Progress ({self.uncertainty_method})')
-        ax2.grid(True)
+        # Correlation over time
+        if self.correlation_history:
+            ax2.plot(self.correlation_history, marker='o')
+            ax2.set_xlabel('Evaluation')
+            ax2.set_ylabel('Correlation with True Reward')
+            ax2.set_title(f'Learning Progress ({self.uncertainty_method})')
+            ax2.grid(True, alpha=0.3)
         
         plt.tight_layout()
-        plt.savefig(f'ird_rlhf_results_{self.uncertainty_method}.png')
-        print(f"\n✓ Results saved to ird_rlhf_results_{self.uncertainty_method}.png")
+        
+        if save_path:
+            plt.savefig(save_path, dpi=150)
+            print(f"✓ Plot saved to {save_path}")
+        else:
+            plt.show()
 
 
-def compare_methods(num_preferences_per_method=30):
+def compare_methods(num_preferences=30, simulated=True):
     """
     Compare IRD vs Ensemble vs Random trajectory selection.
-    
-    @param num_preferences_per_method: labels to collect per method
     """
     methods = ['ird', 'ensemble', 'random']
     results = {}
@@ -536,96 +459,78 @@ def compare_methods(num_preferences_per_method=30):
         )
         
         # Collect preferences
-        trainer.collect_preferences_with_uncertainty(
-            num_preferences=num_preferences_per_method,
+        trainer.collect_preferences(
+            num_preferences=num_preferences,
             candidates_per_pair=20,
-            steps=8
+            steps=8,
+            simulated=simulated
         )
         
         # Evaluate
-        eval_results = trainer.evaluate_sample_efficiency(num_trials=5)
+        eval_results = trainer.evaluate_sample_efficiency(num_test=30)
         results[method] = eval_results
         
         # Plot
-        trainer.plot_results()
+        trainer.plot_results(save_path=f'results_{method}.png')
     
-    # Compare results
+    # Print comparison
     print("\n" + "="*60)
     print("FINAL COMPARISON")
     print("="*60)
     for method, res in results.items():
-        print(f"{method:10s}: correlation = {res['avg_correlation']:.4f}")
+        print(f"{method:10s}: correlation = {res['correlation']:.4f}")
+    
+    return results
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description='IRD-enhanced RLHF training'
-    )
-    parser.add_argument(
-        '--method',
-        type=str,
-        default='ird',
-        choices=['ird', 'ensemble', 'random'],
-        help='Trajectory selection method'
-    )
-    parser.add_argument(
-        '--num_preferences',
-        type=int,
-        default=50,
-        help='Number of preferences to collect'
-    )
-    parser.add_argument(
-        '--candidates_per_pair',
-        type=int,
-        default=20,
-        help='Candidate trajectories to generate per pair'
-    )
-    parser.add_argument(
-        '--compare',
-        action='store_true',
-        help='Compare all methods'
-    )
+    parser = argparse.ArgumentParser(description='IRD-enhanced RLHF training')
+    parser.add_argument('--method', type=str, default='ird',
+                       choices=['ird', 'ensemble', 'random'])
+    parser.add_argument('--num_preferences', type=int, default=30)
+    parser.add_argument('--candidates_per_pair', type=int, default=20)
+    parser.add_argument('--simulated', action='store_true',
+                       help='Use simulated preferences (true reward as oracle)')
+    parser.add_argument('--compare', action='store_true',
+                       help='Compare all methods')
+    parser.add_argument('--train_policy', action='store_true',
+                       help='Train policy after reward learning')
     
     args = parser.parse_args()
     
-    # TODO comment bottom two lines
     if args.compare:
-        compare_methods(num_preferences_per_method=args.num_preferences)
+        compare_methods(
+            num_preferences=args.num_preferences,
+            simulated=args.simulated
+        )
     else:
         # Single method training
         trainer = IRDRLHFTrainer(
             world_size=(12, 12),
             uncertainty_method=args.method
         )
-                
-        # Collect preferences with uncertainty-based selection
-        trainer.collect_preferences_with_uncertainty(
+        
+        # Collect preferences
+        trainer.collect_preferences(
             num_preferences=args.num_preferences,
             candidates_per_pair=args.candidates_per_pair,
-            steps=8
+            steps=8,
+            simulated=args.simulated
         )
         
         # Evaluate
-        trainer.evaluate_sample_efficiency(num_trials=5)
+        trainer.evaluate_sample_efficiency(num_test=30)
         
-        # Plot results
-        trainer.plot_results()
+        # Plot
+        trainer.plot_results(save_path=f'results_{args.method}.png')
+        
+        # Optionally train policy
+        if args.train_policy:
+            trainer.train_policy(num_episodes=500, max_steps=20)
         
         print("\n" + "="*60)
         print("TRAINING COMPLETE!")
         print("="*60)
-        print(f"Method: {args.method}")
-        print(f"Preferences collected: {args.num_preferences}")
-        print(f"\nNext steps:")
-        print("  1. Train policy using learned reward")
-        print("  2. Iterate: collect more preferences with improved policy")
-        print("  3. Compare sample efficiency across methods")
-        
-        # from test import RewardModelTester
-
-        # # Assuming you have a trained trainer
-        # tester = RewardModelTester(trainer)
-        # tester.run_all_tests(num_test=50)
 
 
 if __name__ == "__main__":
