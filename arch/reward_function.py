@@ -34,11 +34,7 @@ class BayesianRewardModel:
     ]
     
     def __init__(self, feature_dim=5, num_samples=100, prior_std=2.0):
-        """
-        @param feature_dim: dimension of feature vector
-        @param num_samples: number of posterior samples to maintain
-        @param prior_std: standard deviation of Gaussian prior
-        """
+ 
         self.feature_dim = feature_dim
         self.num_samples = num_samples
         self.prior_std = prior_std
@@ -56,11 +52,6 @@ class BayesianRewardModel:
     def set_proxy_reward(self, weights):
         """
         Set the proxy reward weights and initialize prior around them.
-        
-        FIX: Prior is now centered at proxy_weights, not zero!
-        This means we start with beliefs close to the proxy reward.
-        
-        @param weights: array of shape (feature_dim,)
         """
         self.proxy_weights = np.array(weights, dtype=np.float32)
         assert len(self.proxy_weights) == self.feature_dim
@@ -76,22 +67,7 @@ class BayesianRewardModel:
         )
     
     def compute_features(self, world, trajectory):
-        """
-        Extract feature vector from a trajectory.
-        
-        IMPORTANT: Does NOT modify world state - uses deep copy.
-        
-        Features:
-        1. Seeds collected (positive is good)
-        2. Time spent under clouds (negative is good -> want negative weight)
-        3. Battery depletion events (negative is good -> want negative weight)
-        4. Average movement per step (can be positive or negative)
-        5. Final battery level normalized (positive is good)
-        
-        @param world: SciWrld instance
-        @param trajectory: list of (row, col) positions
-        @return: feature vector of shape (feature_dim,)
-        """
+  
         # Work on a copy to avoid side effects
         world_copy = deepcopy(world)
         
@@ -142,25 +118,10 @@ class BayesianRewardModel:
         return features
     
     def compute_reward(self, features, weights):
-        """
-        Compute reward for features given weights.
-        
-        @param features: feature vector
-        @param weights: weight vector
-        @return: scalar reward
-        """
         return np.dot(weights, features)
     
     def compute_reward_uncertainty(self, world, trajectory):
-        """
-        Compute mean reward and variance across posterior samples.
-        
-        This is the key for trajectory selection: high variance = high uncertainty.
-        
-        @param world: SciWrld instance
-        @param trajectory: list of positions
-        @return: (mean_reward, variance)
-        """
+
         features = self.compute_features(world, trajectory)
         
         # Compute reward under each posterior sample
@@ -179,13 +140,6 @@ class BayesianRewardModel:
         
         Likelihood: P(traj_i > traj_j | w) = σ((r_w(traj_i) - r_w(traj_j)) / τ)
         where σ is the sigmoid function.
-        
-        @param traj1: first trajectory
-        @param world1: world state for traj1
-        @param traj2: second trajectory  
-        @param world2: world state for traj2
-        @param preferred_idx: 0 if traj1 preferred, 1 if traj2 preferred
-        @param temperature: softmax temperature
         """
         if self.proxy_weights is None:
             raise ValueError("Must set proxy_weights before updating posterior")
@@ -296,17 +250,8 @@ class BayesianRewardModel:
         return np.std(self.posterior_samples, axis=0)
 
 class NeuralRewardModel(nn.Module):
-    """
-    Trainable neural network reward model.
-    
-    Used with PreferenceLearner to learn from human preferences.
-    """
     
     def __init__(self, state_dim=7, hidden_dim=64):
-        """
-        @param state_dim: dimension of encoded state
-        @param hidden_dim: hidden layer size
-        """
         super().__init__()
         
         self.net = nn.Sequential(
@@ -350,12 +295,7 @@ class NeuralRewardEnsemble:
         ])
     
     def predict_trajectory_reward(self, trajectory_states):
-        """
-        Predict reward with uncertainty.
-        
-        @param trajectory_states: array of shape (T, state_dim)
-        @return: (mean_reward, variance)
-        """
+
         if not isinstance(trajectory_states, torch.Tensor):
             trajectory_states = torch.tensor(trajectory_states, dtype=torch.float32)
         
@@ -369,16 +309,13 @@ class NeuralRewardEnsemble:
         return np.mean(rewards), np.var(rewards)
     
     def parameters(self):
-        """Return all parameters for optimizer."""
         return self.models.parameters()
     
     def train(self, mode=True):
-        """Set training mode."""
         for model in self.models:
             model.train(mode)
     
     def eval(self):
-        """Set evaluation mode."""
         self.train(False)
 
 def compute_true_reward(world, trajectory):
